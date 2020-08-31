@@ -1,12 +1,13 @@
-module PhotoGroove exposing (main)
+port module PhotoGroove exposing (main)
 
 import Browser
-import Html exposing (Html, button, div, h1, h3, img, input, label, text)
-import Html.Attributes exposing (..)
-import Html.Events exposing (onCheck, onClick)
+import Html exposing (Attribute, Html, button, canvas, div, h1, h3, img, input, label, node, text)
+import Html.Attributes as Attr exposing (..)
+import Html.Events exposing (on, onCheck, onClick)
 import Http
-import Json.Decode exposing (Decoder, int, list, string, succeed)
+import Json.Decode exposing (Decoder, at, int, list, string, succeed)
 import Json.Decode.Pipeline exposing (optional, required)
+import Json.Encode as Encode
 import Random
 
 
@@ -15,6 +16,22 @@ type alias Image =
     , size : Int
     , title : String
     }
+
+
+type alias FilterOptions =
+    { url : String
+    , filters :
+        List
+            { name : String
+            , amount : Float
+            }
+    }
+
+
+port setFilters : FilterOptions -> Cmd msg
+
+
+port activityChanges : (String -> msg) -> Sub msg
 
 
 photoDecoder : Decoder Image
@@ -33,20 +50,28 @@ type ThumbnailSize
 
 type Status
     = Loading
-    | Loaded Image (List Image) String
+    | Loaded (List Image) String
     | Errored String
 
 
 type alias Model =
     { status : Status
+    , activity : String
     , choosenSize : ThumbnailSize
+    , hue : Int
+    , ripple : Int
+    , noise : Int
     }
 
 
 initialModel : Model
 initialModel =
     { status = Loading
+    , activity = ""
     , choosenSize = Medium
+    , hue = 0
+    , ripple = 0
+    , noise = 0
     }
 
 
@@ -76,7 +101,7 @@ viewSizeChooser checkedSize size =
             , name "size"
             , onCheck
                 (\checked ->
-                    ClickedSize
+                    CheckedSize
                         (if checked then
                             size
 
@@ -97,17 +122,21 @@ viewThumbnail selectedUrl thumb =
         [ src (urlPrefix ++ thumb.url)
         , title (thumb.title ++ " [" ++ String.fromInt thumb.size ++ " KB]")
         , classList [ ( "selected", selectedUrl == thumb.url ) ]
-        , onClick (ClickedPhoto thumb.url)
+        , onClick (ClickedImage thumb.url)
         ]
         []
 
 
 type Msg
-    = ClickedPhoto String
+    = ClickedImage String
     | ClickedSurpriseMe
-    | ClickedSize ThumbnailSize
-    | GotRandomPhoto Image
+    | CheckedSize ThumbnailSize
+    | GotRandomImage Image
     | GotImages (Result Http.Error (List Image))
+    | SlideHue Int
+    | SlideRipple Int
+    | SlideNoise Int
+    | GotActivity String
 
 
 initialCmd : Cmd Msg
@@ -121,15 +150,21 @@ initialCmd =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        ClickedPhoto url ->
-            ( { model | status = selectUrl url model.status }, Cmd.none )
+        GotActivity activity ->
+            ( { model | activity = activity }, Cmd.none )
+
+        ClickedImage url ->
+            applyFilters { model | status = selectUrl url model.status }
 
         ClickedSurpriseMe ->
             case model.status of
-                Loaded firstImage images _ ->
+                Loaded (firstImage :: images) _ ->
                     Random.uniform firstImage images
-                        |> Random.generate GotRandomPhoto
+                        |> Random.generate GotRandomImage
                         |> Tuple.pair model
+
+                Loaded [] _ ->
+                    ( model, Cmd.none )
 
                 Loading ->
                     ( model, Cmd.none )
@@ -137,16 +172,26 @@ update msg model =
                 Errored _ ->
                     ( model, Cmd.none )
 
-        ClickedSize size ->
+        CheckedSize size ->
             ( { model | choosenSize = size }, Cmd.none )
 
-        GotRandomPhoto image ->
-            ( { model | status = selectUrl image.url model.status }, Cmd.none )
+        GotRandomImage image ->
+            applyFilters { model | status = selectUrl image.url model.status }
+
+        SlideHue hue ->
+            applyFilters { model | hue = hue }
+
+        SlideRipple ripple ->
+            applyFilters { model | ripple = ripple }
+
+        SlideNoise noise ->
+            applyFilters { model | noise = noise }
 
         GotImages (Ok images) ->
             case images of
                 first :: rest ->
-                    ( { model | status = Loaded first rest first.url }, Cmd.none )
+                    applyFilters
+                        { model | status = Loaded rest first.url }
 
                 [] ->
                     ( { model | status = Errored "0 photos found" }, Cmd.none )
@@ -155,11 +200,34 @@ update msg model =
             ( { model | status = Errored "Server error!" }, Cmd.none )
 
 
+applyFilters : Model -> ( Model, Cmd Msg )
+applyFilters model =
+    case model.status of
+        Loaded _ selectedUrl ->
+            let
+                filters =
+                    [ { name = "Hue", amount = toFloat model.hue / 10 }
+                    , { name = "Ripple", amount = toFloat model.ripple / 10 }
+                    , { name = "Noise", amount = toFloat model.noise / 10 }
+                    ]
+
+                url =
+                    urlPrefix ++ "large/" ++ selectedUrl
+            in
+            ( model, setFilters { url = url, filters = filters } )
+
+        Loading ->
+            ( model, Cmd.none )
+
+        Errored _ ->
+            ( model, Cmd.none )
+
+
 selectUrl : String -> Status -> Status
 selectUrl url status =
     case status of
-        Loaded firstImage images _ ->
-            Loaded firstImage images url
+        Loaded images _ ->
+            Loaded images url
 
         Loading ->
             status
@@ -168,26 +236,32 @@ selectUrl url status =
             status
 
 
-viewLoaded : List Image -> String -> ThumbnailSize -> List (Html Msg)
-viewLoaded photos selectedUrl choosenSize =
+viewLoaded : List Image -> String -> Model -> List (Html Msg)
+viewLoaded images selectedUrl model =
     [ h1 [] [ text "Photo Groove" ]
     , button
         [ onClick ClickedSurpriseMe ]
         [ text "Surprise Me!" ]
+    , div [ class "activity" ] [ text model.activity ]
+    , div [ class "filters" ]
+        [ viewFilter SlideHue "Hue" model.hue
+        , viewFilter SlideRipple "Ripple" model.ripple
+        , viewFilter SlideNoise "Noise" model.noise
+        ]
     , h3 [] [ text "Thumbnail Size:" ]
     , div [ id "choose-size" ]
-        (List.map (viewSizeChooser choosenSize) [ Small, Medium, Large ])
+        (List.map (viewSizeChooser model.choosenSize) [ Small, Medium, Large ])
     , div
         [ id "thumbnails"
-        , class (sizeToString choosenSize)
+        , class (sizeToString model.choosenSize)
         ]
         (List.map
             (viewThumbnail selectedUrl)
-            photos
+            images
         )
-    , img
-        [ class "large"
-        , src (urlPrefix ++ "large/" ++ selectedUrl)
+    , canvas
+        [ id "main-canvas"
+        , class "large"
         ]
         []
     ]
@@ -197,8 +271,8 @@ view : Model -> Html Msg
 view model =
     div [ class "content" ] <|
         case model.status of
-            Loaded _ images selectedUrl ->
-                viewLoaded images selectedUrl model.choosenSize
+            Loaded images selectedUrl ->
+                viewLoaded images selectedUrl model
 
             Loading ->
                 [ text "Loading..." ]
@@ -207,11 +281,51 @@ view model =
                 [ text ("Error: " ++ errorMessage) ]
 
 
-main : Program () Model Msg
+viewFilter : (Int -> Msg) -> String -> Int -> Html Msg
+viewFilter toMsg name magnitude =
+    div [ class "filter-slider" ]
+        [ label [] [ text name ]
+        , rangeSlider
+            [ Attr.max "10"
+            , Attr.property "val" (Encode.int magnitude)
+            , onSlide toMsg
+            ]
+            []
+        , label [] [ text (String.fromInt magnitude) ]
+        ]
+
+
+main : Program Float Model Msg
 main =
     Browser.element
-        { init = \_ -> ( initialModel, initialCmd )
+        { init = init
         , view = view
         , update = update
-        , subscriptions = \_ -> Sub.none
+        , subscriptions = subscriptions
         }
+
+
+init : Float -> ( Model, Cmd Msg )
+init flags =
+    let
+        activity =
+            "initialazing Pasta  v" ++ String.fromFloat flags
+    in
+    ( { initialModel | activity = activity }, initialCmd )
+
+
+subscriptions : Model -> Sub Msg
+subscriptions _ =
+    activityChanges GotActivity
+
+
+rangeSlider : List (Attribute msg) -> List (Html msg) -> Html msg
+rangeSlider attributes children =
+    node "range-slider" attributes children
+
+
+onSlide : (Int -> msg) -> Attribute msg
+onSlide toMsg =
+    at [ "detail", "slideValue" ] int
+        |> Json.Decode.map toMsg
+        |> on "slide"
