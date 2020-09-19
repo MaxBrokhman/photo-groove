@@ -47,9 +47,10 @@
       // Pasta.addActivityListener((activity) => {
       //   app.ports.activityChanges.send(activity)
       // })
-      const app = Elm.PhotoFolders.init({
-        node: document.getElementById("app"),
-      });
+      // const app = Elm.PhotoFolders.init({
+      //   node: document.getElementById("app"),
+      // });
+      const app = Elm.Main.init({node: document.getElementById("app")});
     </script>
   </body>
 </html>
